@@ -79,9 +79,9 @@ def parse_transactions(pages, statement_month, statement_year):
                     tdate = format_date(tdate_raw, statement_month, statement_year)
                     pdate = format_date(pdate_raw, statement_month, statement_year)
                     # Clean desc
-                    desc = re.split(r' AnnualInterestRate', desc)[0]
-                    desc = re.split(r' AvailableCredit', desc)[0]
-                    desc = re.split(r' FOREIGNCURRENCY', desc)[0]
+                    desc = re.split(r' Annual Interest Rate', desc)[0]
+                    desc = re.split(r' Available Credit', desc)[0]
+                    desc = re.split(r' FOREIGN CURRENCY', desc)[0]
                     desc = re.split(r' @EXCHANGERATE', desc)[0]
                     transactions.append({
                         'tdate': tdate,
