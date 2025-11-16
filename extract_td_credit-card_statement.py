@@ -75,6 +75,7 @@ def parse_transactions(pages, statement_month, statement_year):
                 amt_match = re.search(r'(-?\$[\d,]+\.\d{2})', line)
                 if amt_match:
                     amt = amt_match.group(1)
+                    amt_clean = amt.replace('$', '').replace(',', '')
                     desc = line.replace(amt, '').replace(tdate_raw, '').replace(pdate_raw, '').strip()
                     tdate = format_date(tdate_raw, statement_month, statement_year)
                     pdate = format_date(pdate_raw, statement_month, statement_year)
@@ -87,7 +88,7 @@ def parse_transactions(pages, statement_month, statement_year):
                         'tdate': tdate,
                         'pdate': pdate,
                         'description': desc,
-                        'amount': amt
+                        'amount': amt_clean
                     })
     return transactions
 
