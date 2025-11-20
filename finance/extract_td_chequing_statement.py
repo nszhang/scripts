@@ -1,300 +1,300 @@
 #!/usr/bin/env python3
 """
-TD Bank Chequing Statement PDF Extractor
-Extracts transaction data from TD bank monthly chequing statements
+Extract transaction data from TD chequing bank statement PDF using pdfplumber.
+Usage: python extract_td_chequing_statement_pdfplumber.py <pdf_path> <output_json>
 """
 
-import re
-import json
 import sys
-from pathlib import Path
-import pdfplumber
-from PyPDF2 import PdfReader
+import json
+import re
+from datetime import datetime
+
+try:
+    import pdfplumber
+except ImportError:
+    print("Error: pdfplumber is not installed. Install it with: pip install pdfplumber")
+    sys.exit(1)
 
 
-def extract_text_from_pdf(pdf_path):
-    """Extract text content from PDF file or handle text content directly"""
-    try:
-        # Check if this is a text file (for testing with provided content)
-        with open(pdf_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-            # If it starts with typical PDF content, it's a real PDF
-            if content.startswith('%PDF'):
-                # It's a real PDF, try PyPDF2 first for better space preservation
-                return extract_with_pypdf2(pdf_path)
-            else:
-                # It's already extracted text content
-                return content
-    except UnicodeDecodeError:
-        # Binary file, try as PDF
-        return extract_with_pypdf2(pdf_path)
-    except Exception as e:
-        print(f"Error reading file: {e}", file=sys.stderr)
-        sys.exit(1)
+def extract_text(pdf_path):
+    """Extract text from PDF using pdfplumber."""
+    pages_text = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if text:
+                pages_text.append(text)
+    return pages_text
 
 
-def extract_with_pypdf2(pdf_path):
-    """Extract text from PDF using PyPDF2 for better space preservation"""
-    try:
-        reader = PdfReader(pdf_path)
-        text = ""
-        for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
+def parse_header(pages):
+    """Parse header information from the statement."""
+    header = {}
+    
+    for page_text in pages:
+        lines = page_text.split('\n')
         
-        # If PyPDF2 extraction is too sparse, fall back to pdfplumber
-        if len(text.strip()) < 100:  # If very little text extracted
-            return extract_with_pdfplumber(pdf_path)
-            
-        return text
-    except Exception as e:
-        print(f"Error with PyPDF2: {e}", file=sys.stderr)
-        return extract_with_pdfplumber(pdf_path)
-
-
-def extract_with_pdfplumber(pdf_path):
-    """Extract text from PDF using pdfplumber as fallback"""
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            text = ""
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
-            return text
-    except Exception as e:
-        print(f"Error reading PDF: {e}", file=sys.stderr)
-        sys.exit(1)
-
-
-def clean_extracted_text(text):
-    """Clean up text extracted from PDF that has spaces between characters"""
-    # Check if text has excessive spacing (likely from PDF extraction)
-    if ' ' in text and len(text) > 100:
-        # Count ratio of spaces to characters
-        space_ratio = text.count(' ') / len(text)
-        if space_ratio > 0.3:  # More than 30% spaces indicates spaced-out text
-            # Remove spaces between characters but preserve word boundaries
-            # This is a heuristic approach for this specific PDF format
-            text = re.sub(r'(?<=[a-zA-Z0-9])\s+(?=[a-zA-Z0-9])', '', text)
+        # Extract account holder name (typically after address lines)
+        for i, line in enumerate(lines):
+            # Look for MR/MS pattern
+            if re.match(r'^(MR|MS|MRS|DR)[A-Z]+', line.strip()):
+                header['AccountHolder'] = line.strip()
+                break
+        
+        # Extract account type
+        for line in lines:
+            if 'ALLINCLUSIVE' in line or 'INCLUSIVE' in line:
+                header['AccountType'] = 'ALL INCLUSIVE'
+                break
+            elif 'CHEQUING' in line.upper() or 'SAVINGS' in line.upper():
+                match = re.search(r'([A-Z\s]+(CHEQUING|SAVINGS|CHECKING)[A-Z\s]*)', line, re.IGNORECASE)
+                if match:
+                    header['AccountType'] = match.group(1).strip()
+                    break
+        
+        # Extract statement period
+        # Format: "SEP 29/23-OCT31/23" or similar
+        period_match = re.search(r'([A-Z]{3})\s*(\d+)/(\d{2})\s*-\s*([A-Z]{3})\s*(\d+)/(\d{2})', page_text, re.IGNORECASE)
+        if period_match:
+            month1, day1, year1, month2, day2, year2 = period_match.groups()
+            year = 2000 + int(year2)
+            header['StatementPeriod'] = f"{month1} {day1} - {month2} {day2}, {year}"
+        else:
+            # Try alternative format
+            period_match = re.search(r'([A-Z][a-z]+)\s+(\d+)\s*-\s*([A-Z][a-z]+)\s+(\d+),\s*(\d{4})', page_text)
+            if period_match:
+                month1, day1, month2, day2, year = period_match.groups()
+                header['StatementPeriod'] = f"{month1} {day1} - {month2} {day2}, {year}"
+        
+        # Extract branch number
+        branch_match = re.search(r'Branch\s*No\.\s*(\d+)', page_text, re.IGNORECASE)
+        if not branch_match:
+            branch_match = re.search(r'(\d{4})\s+\d{4}-\d{7}', page_text)  # Pattern like "8181 8181-6258056"
+        if branch_match:
+            header['BranchNumber'] = branch_match.group(1)
+        
+        # Extract account number
+        account_match = re.search(r'Account\s*No\.\s*(\d+[-\s]?\d+)', page_text, re.IGNORECASE)
+        if not account_match:
+            account_match = re.search(r'\d{4}\s+(\d{4}-\d{7})', page_text)  # Pattern like "8181 8181-6258056"
+        if account_match:
+            header['AccountNumber'] = account_match.group(1).replace(' ', '')
+        
+        # Break after first page for header info
+        if header:
+            break
     
-    return text
+    return header
 
 
-def parse_statement_summary(text):
-    """Extract summary information from statement"""
-    # Clean the text first
-    text = clean_extracted_text(text)
-    
-    summary = {
-        "statement_period": "",
-        "account_number": "",
-        "branch_number": ""
-    }
-    
-    # Extract statement period (format: SEP29/23-OCT31/23)
-    period_match = re.search(r'([A-Z]{3}\d{2}/\d{2}-[A-Z]{3}\d{2}/\d{2})', text)
-    if period_match:
-        summary["statement_period"] = period_match.group(1)
-    
-    # Extract account and branch numbers (format: 81818181-6258056)
-    account_match = re.search(r'(\d{4})(\d{4}-\d{7})', text)
-    if account_match:
-        summary["branch_number"] = account_match.group(1)
-        summary["account_number"] = account_match.group(2)
-    
-    return summary
-
-
-def parse_transactions(text):
-    """Parse transaction data from statement text"""
+def parse_transactions(pages, statement_period):
+    """Parse transactions from the statement pages."""
     transactions = []
     
-    # Clean the text first
-    text = clean_extracted_text(text)
+    # Extract year from statement period
+    # Try to find 4-digit year first
+    year_match = re.search(r'(\d{4})', statement_period) if statement_period else None
+    if year_match:
+        statement_year = int(year_match.group(1))
+    else:
+        # Try 2-digit year
+        year_match = re.search(r'/(\d{2})', statement_period) if statement_period else None
+        if year_match:
+            statement_year = 2000 + int(year_match.group(1))
+        else:
+            statement_year = datetime.now().year
     
-    # Find the transaction table section
-    # Look for the line with "DescriptionWithdrawalsDepositsDateBalance"
-    table_start = text.find("DescriptionWithdrawalsDepositsDateBalance")
-    if table_start == -1:
-        return transactions
-    
-    # Get the transaction section (from table start to before summary totals)
-    transaction_section = text[table_start:]
-    
-    # Split into lines and process
-    lines = transaction_section.split('\n')
-    
-    # Skip the header line
-    for line in lines[1:]:
-        line = line.strip()
-        if not line:
-            continue
+    for page_text in pages:
+        lines = page_text.split('\n')
+        
+        transaction_started = False
+        
+        for line in lines:
+            line_orig = line.strip()
+            if not line_orig:
+                continue
             
-        # Stop when we reach the totals or closing balance
-        if "CLOSINGBALANCE" in line or "TOTALS" in line or "Account/TransactionTypeFees" in line:
-            break
+            # Check for transaction section start
+            if re.search(r'(Description\s+Withdrawals?\s+Deposits?\s+Date\s+Balance)', line_orig, re.IGNORECASE):
+                transaction_started = True
+                continue
             
-        # Skip starting balance line
-        if "STARTINGBALANCE" in line:
-            continue
+            # Check for starting balance
+            if re.search(r'STARTINGBALANCE', line_orig, re.IGNORECASE):
+                # Extract date and balance
+                # Format: STARTINGBALANCE SEP29 9,597.75
+                date_match = re.search(r'([A-Z]{3})(\d{1,2})', line_orig, re.IGNORECASE)
+                balance_match = re.search(r'([\d,]+\.\d{2})$', line_orig)
+                
+                if date_match and balance_match:
+                    month_abbr = date_match.group(1).upper()
+                    day = date_match.group(2).zfill(2)
+                    balance = balance_match.group(1).replace(',', '')
+                    
+                    transactions.append({
+                        'date': f"{month_abbr}-{day}-{statement_year}",
+                        'description': 'STARTING BALANCE',
+                        'withdrawal': None,
+                        'deposit': None,
+                        'balance': balance
+                    })
+                continue
             
-        # Parse transaction line
-        transaction = parse_transaction_line(line)
-        if transaction:
-            transactions.append(transaction)
+            # Check for closing balance - skip it as requested
+            if re.search(r'CLOSINGBALANCE', line_orig, re.IGNORECASE):
+                break
+            
+            # Parse regular transactions
+            # Pattern with pdfplumber (cleaner): DESCRIPTION AMOUNT DATE [BALANCE]
+            # Example: "MAXIMABAKERY _F 22.00 OCT03"
+            # Example: "WY572TFR-FR0525308 82.00 OCT03"
+            # Example: "CREDITMEMO 3,000.00 OCT03"
+            
+            if not transaction_started:
+                continue
+            
+            # Look for lines with dates at the end (e.g., "OCT03", "SEP29")
+            # Pattern: uppercase month + 1-2 digit day
+            date_pattern = r'([A-Z]{3})(\d{1,2})(?:\s|$)'
+            date_matches = list(re.finditer(date_pattern, line_orig))
+            
+            if len(date_matches) >= 1:
+                # Use the last date as the transaction date
+                last_date = date_matches[-1]
+                month_abbr = last_date.group(1).upper()
+                day = last_date.group(2).zfill(2)
+                date_str = f"{month_abbr}-{day}-{statement_year}"
+                
+                # Extract everything before the last date
+                before_date = line_orig[:last_date.start()].strip()
+                # Extract everything after the last date (might be balance)
+                after_date = line_orig[last_date.end():].strip()
+                
+                # Find all monetary amounts in the line
+                amount_pattern = r'([\d,]+\.\d{2})'
+                all_amounts = re.findall(amount_pattern, line_orig)
+                
+                if not all_amounts:
+                    continue
+                
+                # Determine description and amounts
+                # Typically: Description Amount Date [Balance]
+                # Or: Description Date Balance
+                
+                # Find amounts before the date
+                amounts_before_date = re.findall(amount_pattern, before_date)
+                amounts_after_date = re.findall(amount_pattern, after_date)
+                
+                withdrawal = None
+                deposit = None
+                balance = None
+                
+                if amounts_before_date:
+                    # First amount before date is the transaction amount
+                    transaction_amount = amounts_before_date[0].replace(',', '')
+                    
+                    # Remove the transaction amount from before_date to get description
+                    description = before_date
+                    for amt in amounts_before_date:
+                        description = description.replace(amt, '', 1).strip()
+                    
+                    # Check if it's a deposit or withdrawal based on description keywords
+                    desc_upper = description.upper()
+                    is_deposit = any(keyword in desc_upper for keyword in 
+                                    ['CREDIT', 'DEPOSIT', 'TRANSFERTO', 'MEMO', 'E-TRANSFER', 'ETRANSFER'])
+                    
+                    if is_deposit:
+                        deposit = transaction_amount
+                    else:
+                        withdrawal = transaction_amount
+                    
+                    # If there are more amounts, the last one is likely the balance
+                    if len(amounts_before_date) > 1:
+                        balance = amounts_before_date[-1].replace(',', '')
+                    elif amounts_after_date:
+                        balance = amounts_after_date[-1].replace(',', '')
+                elif amounts_after_date:
+                    # Amount is after the date (unusual but possible)
+                    balance = amounts_after_date[0].replace(',', '')
+                    description = before_date
+                else:
+                    description = before_date
+                
+                # Clean up description
+                description = re.sub(r'\s+', ' ', description).strip()
+                
+                if description:  # Only add if we have a description
+                    transactions.append({
+                        'date': date_str,
+                        'description': description,
+                        'withdrawal': withdrawal,
+                        'deposit': deposit,
+                        'balance': balance
+                    })
     
     return transactions
 
 
-def parse_transaction_line(line):
-    """Parse a single transaction line with space-removed format"""
-    # Pattern to match: Description[Reference][Amount]Date[Balance]
-    # The date is always in format: OCT03, SEP29, etc (3 letters + 2 digits)
-
-    # Find date pattern - this is our anchor
-    date_pattern = r'([A-Z]{3}\d{2})'
-    date_matches = list(re.finditer(date_pattern, line))
-
-    if not date_matches:
-        return None
-
-    # Use the first date as the transaction date
-    date_match = date_matches[0]
-    date_str = date_match.group(1)
-
-    # Everything before the date is description + amounts + references
-    before_date = line[:date_match.start()]
-
-    # Look for amount patterns: numbers with commas and 2 decimal places
-    amount_pattern = r'[\d,]+\.\d{2}'
-    amounts = re.findall(amount_pattern, before_date)
-
-    if not amounts:
-        # No amounts found, might be a description-only line
-        return None
-
-    # Convert all amounts to float values
-    parsed_amounts = [(amt, float(amt.replace(',', ''))) for amt in amounts]
-
-    # Sort by value to prioritize reasonable transaction amounts
-    parsed_amounts.sort(key=lambda x: x[1])
-
-    # Filter out obvious non-transaction amounts:
-    # - Very large numbers (> 100,000) are likely balances or references
-    # - Numbers starting with 0 followed by 7+ digits are references
-    # - Keep amounts that look like normal banking transactions
-
-    candidate_amounts = []
-    for amt_str, amt_val in parsed_amounts:
-        # Skip if it looks like a reference number
-        if re.match(r'^0\d{7,}\.\d{2}$', amt_str):
-            continue
-        # Skip very large amounts (likely balances)
-        if amt_val > 100000:
-            continue
-        candidate_amounts.append((amt_str, amt_val))
-
-    if not candidate_amounts:
-        # Skip lines with no reasonable amounts (only references or large numbers)
-        return None
-    else:
-        # Take the first (smallest) candidate as the transaction amount
-        transaction_amount_str, transaction_amount = candidate_amounts[0]
-
-    # The description is everything before the transaction amount
-    first_amount_pos = before_date.find(transaction_amount_str)
-    if first_amount_pos == -1:
-        return None
-
-    description = before_date[:first_amount_pos].strip()
-
-    # Clean up description - remove any trailing numbers/characters
-    description = re.sub(r'[\d\-\*]+$', '', description)
-
-    # Determine deposit or withdrawal based on description
-    desc_upper = description.upper()
-
-    # Deposits usually contain: CREDIT, MEMO, TFR-TO, E-TRANSFER, REBATE, TOC/C
-    deposit_keywords = ['CREDIT', 'MEMO', 'TFR-TO', 'REBATE', 'TOC/C', 'E-TRANSFER']
-    # Withdrawals usually contain: TFR-FR, W/D, PYMT, BAKERY, MASTRCRD, VISA, FEE
-    withdrawal_keywords = ['TFR-FR', 'W/D', 'PYMT', 'BAKERY', 'MASTRCRD', 'VISA', 'FEE']
-
-    deposit = None
-    withdrawal = None
-
-    if any(keyword in desc_upper for keyword in deposit_keywords):
-        deposit = transaction_amount
-    elif any(keyword in desc_upper for keyword in withdrawal_keywords):
-        withdrawal = transaction_amount
-    else:
-        # Default logic for ambiguous cases
-        if 'TFR' in desc_upper:
-            # TFR-TO is deposit, TFR-FR is withdrawal
-            if 'TFR-TO' in desc_upper:
-                deposit = transaction_amount
-            else:
-                withdrawal = transaction_amount
-        elif 'E-TRANSFER' in desc_upper:
-            # E-TRANSFER is usually a deposit
-            deposit = transaction_amount
-        else:
-            # Default to withdrawal for safety
-            withdrawal = transaction_amount
-
-    return {
-        "date": date_str,
-        "description": description,
-        "deposits": deposit,
-        "withdrawals": withdrawal
-    }
+def parse_footer(pages):
+    """Parse footer information (fees, rebates, etc.)."""
+    footer = {}
+    
+    for page_text in pages:
+        # Look for fees section
+        fee_match = re.search(r'TOTAL\s+FEES[:\s]+([\d,]+\.\d{2})', page_text, re.IGNORECASE)
+        if fee_match:
+            footer['TotalFees'] = fee_match.group(1)
+        
+        # Look for rebates
+        rebate_match = re.search(r'REBATE[:\s]+([\d,]+\.\d{2})', page_text, re.IGNORECASE)
+        if rebate_match:
+            footer['Rebate'] = rebate_match.group(1)
+        
+        # Look for issuer information
+        if 'TD CANADA TRUST' in page_text:
+            footer['Issuer'] = 'TD CANADA TRUST'
+    
+    return footer
 
 
-def main():
-    """Main function to process PDF and output JSON"""
-    if len(sys.argv) < 2:
-        print("Usage: python extract_td_chequing_statement.py <pdf_file> [output_file]", file=sys.stderr)
+def main(pdf_path, output_json):
+    """Main function to extract and save statement data."""
+    print(f"Extracting text from {pdf_path} using pdfplumber...")
+    pages = extract_text(pdf_path)
+    
+    if not pages:
+        print("Error: Could not extract text from PDF")
         sys.exit(1)
     
-    pdf_path = sys.argv[1]
-    output_path = sys.argv[2] if len(sys.argv) > 2 else None
+    print("Parsing header information...")
+    header = parse_header(pages)
     
-    if not Path(pdf_path).exists():
-        print(f"Error: File '{pdf_path}' not found", file=sys.stderr)
-        sys.exit(1)
+    print("Parsing transactions...")
+    statement_period = header.get('StatementPeriod', '')
+    transactions = parse_transactions(pages, statement_period)
     
-    # Extract text from PDF
-    print(f"Processing {pdf_path}...", file=sys.stderr)
-    text = extract_text_from_pdf(pdf_path)
+    print("Parsing footer information...")
+    footer = parse_footer(pages)
     
-    # Debug: Print first 1000 characters of extracted text
-    print("DEBUG: Extracted text sample:", file=sys.stderr)
-    print(text[:1000], file=sys.stderr)
-    print("..." + "="*50, file=sys.stderr)
-    
-    # Parse summary and transactions
-    summary = parse_statement_summary(text)
-    transactions = parse_transactions(text)
-    
-    # Create output structure
-    output = {
-        "summary": summary,
-        "transactions": transactions
+    # Combine all data
+    data = {
+        'header': header,
+        'transactions': transactions,
+        'footer': footer
     }
     
-    # Output as JSON
-    json_output = json.dumps(output, indent=2)
+    # Save to JSON
+    with open(output_json, 'w') as f:
+        json.dump(data, f, indent=4)
     
-    if output_path:
-        # Save to file
-        with open(output_path, 'w') as f:
-            f.write(json_output)
-        print(f"Output saved to {output_path}", file=sys.stderr)
-    else:
-        # Print to stdout
-        print(json_output)
+    print(f"Extracted {len(transactions)} transactions from {pdf_path}")
+    print(f"Output saved to {output_json}")
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    if len(sys.argv) != 3:
+        print("Usage: python extract_td_chequing_statement_pdfplumber.py <pdf_path> <output_json>")
+        sys.exit(1)
+    
+    main(sys.argv[1], sys.argv[2])
+
