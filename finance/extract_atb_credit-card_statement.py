@@ -97,35 +97,134 @@ def format_date(month_abbr, day, statement_month, statement_year):
     return f"{month_abbr}-{day:02d}-{year}"
 
 def parse_transactions(pages, statement_month, statement_year):
-    """Parse transactions from all pages."""
+    """Parse transactions from all pages.
+    
+    Handles multi-line transactions where description spans multiple lines
+    and amount appears on the last line.
+    """
     transactions = []
     
-    # Pattern: Dec 12 Dec 13 DESCRIPTION 1,476.29
-    # Date Charged, Date Posted, Description, Amount
-    transaction_pattern = re.compile(
-        r'([A-Z][a-z]{2})\s*(\d{1,2})\s+([A-Z][a-z]{2})\s*(\d{1,2})\s+(.+?)\s+([\d,]+\.\d{2})$'
+    # Pattern for transaction start: "Nov 15 Nov 15 DESCRIPTION..."
+    # May or may not have amount on same line
+    transaction_start_pattern = re.compile(
+        r'^([A-Z][a-z]{2})\s+(\d{1,2})\s+([A-Z][a-z]{2})\s+(\d{1,2})\s+(.+)$'
     )
+    
+    # Pattern for split date start: just "Sep 14" alone on a line
+    split_date_start_pattern = re.compile(r'^([A-Z][a-z]{2})\s+(\d{1,2})$')
+    
+    # Pattern for amount at end of line (may be negative)
+    amount_pattern = re.compile(r'(-?[\d,]+\.\d{2})$')
     
     for page in pages:
         lines = page.split('\n')
-        for line in lines:
-            line = line.strip()
-            match = transaction_pattern.match(line)
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # Check for split date pattern (date on its own line)
+            split_match = split_date_start_pattern.match(line)
+            if split_match:
+                charged_month, charged_day = split_match.groups()
+                # Look ahead for posted date on next line
+                if i + 1 < len(lines):
+                    next_line = lines[i + 1].strip()
+                    posted_match = split_date_start_pattern.match(next_line)
+                    if posted_match:
+                        posted_month, posted_day = posted_match.groups()
+                        i += 2
+                        # Now collect description and amount
+                        description_parts = []
+                        amount = None
+                        while i < len(lines):
+                            next_line = lines[i].strip()
+                            if transaction_start_pattern.match(next_line) or split_date_start_pattern.match(next_line):
+                                break
+                            if next_line.startswith('Total ') or next_line.startswith('PURCHASES') or next_line.startswith('PAYMENTS'):
+                                break
+                            if not next_line:
+                                i += 1
+                                continue
+                            
+                            amt_match = amount_pattern.search(next_line)
+                            if amt_match:
+                                amount = amt_match.group(1)
+                                desc_part = next_line[:amt_match.start()].strip()
+                                if desc_part:
+                                    description_parts.append(desc_part)
+                                i += 1
+                                break
+                            else:
+                                description_parts.append(next_line)
+                            i += 1
+                        
+                        if amount:
+                            tdate = format_date(charged_month, charged_day, statement_month, statement_year)
+                            pdate = format_date(posted_month, posted_day, statement_month, statement_year)
+                            amt_clean = amount.replace(',', '')
+                            description = ' '.join(description_parts)
+                            
+                            transactions.append({
+                                'tdate': tdate,
+                                'pdate': pdate,
+                                'description': description.strip(),
+                                'amount': amt_clean
+                            })
+                        continue
+            
+            match = transaction_start_pattern.match(line)
             if match:
-                charged_month, charged_day, posted_month, posted_day, description, amount = match.groups()
+                charged_month, charged_day, posted_month, posted_day, rest = match.groups()
                 
-                tdate = format_date(charged_month, charged_day, statement_month, statement_year)
-                pdate = format_date(posted_month, posted_day, statement_month, statement_year)
+                # Check if amount is on this line
+                amt_match = amount_pattern.search(rest)
+                if amt_match:
+                    amount = amt_match.group(1)
+                    description = rest[:amt_match.start()].strip()
+                else:
+                    # Amount is on a subsequent line, collect description lines
+                    description_parts = [rest]
+                    amount = None
+                    i += 1
+                    while i < len(lines):
+                        next_line = lines[i].strip()
+                        # Stop if we hit another transaction start or section header
+                        if transaction_start_pattern.match(next_line) or split_date_start_pattern.match(next_line):
+                            break
+                        if next_line.startswith('Total ') or next_line.startswith('PURCHASES') or next_line.startswith('PAYMENTS'):
+                            break
+                        if not next_line:
+                            i += 1
+                            continue
+                        
+                        # Check if this line ends with amount
+                        amt_match = amount_pattern.search(next_line)
+                        if amt_match:
+                            amount = amt_match.group(1)
+                            desc_part = next_line[:amt_match.start()].strip()
+                            if desc_part:
+                                description_parts.append(desc_part)
+                            i += 1
+                            break
+                        else:
+                            description_parts.append(next_line)
+                        i += 1
+                    
+                    description = ' '.join(description_parts)
+                    i -= 1  # Adjust since we'll increment at end of loop
                 
-                # Clean amount
-                amt_clean = amount.replace(',', '')
-                
-                transactions.append({
-                    'tdate': tdate,
-                    'pdate': pdate,
-                    'description': description.strip(),
-                    'amount': amt_clean
-                })
+                if amount:
+                    tdate = format_date(charged_month, charged_day, statement_month, statement_year)
+                    pdate = format_date(posted_month, posted_day, statement_month, statement_year)
+                    amt_clean = amount.replace(',', '')
+                    
+                    transactions.append({
+                        'tdate': tdate,
+                        'pdate': pdate,
+                        'description': description.strip(),
+                        'amount': amt_clean
+                    })
+            i += 1
     
     return transactions
 
